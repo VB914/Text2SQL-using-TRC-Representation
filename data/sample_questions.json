@@ -1,0 +1,22 @@
+[
+  {
+    "question": "List the names of all students.",
+    "gold_sql": "SELECT s.name FROM students AS s;"
+  },
+  {
+    "question": "Show each student name with the title of the course they enrolled in.",
+    "gold_sql": "SELECT s.name, c.title FROM students AS s JOIN enrollments AS e ON e.student_id = s.id JOIN courses AS c ON e.course_id = c.id;"
+  },
+  {
+    "question": "How many students are in each department?",
+    "gold_sql": "SELECT d.name, COUNT(s.id) AS student_count FROM departments AS d JOIN students AS s ON s.department_id = d.id GROUP BY d.name;"
+  },
+  {
+    "question": "List the students who are enrolled in a course worth more than 3 credits.",
+    "gold_sql": "SELECT s.name FROM students AS s WHERE EXISTS (SELECT 1 FROM enrollments AS e WHERE e.student_id = s.id AND EXISTS (SELECT 1 FROM courses AS c WHERE c.id = e.course_id AND c.credits > 3));"
+  },
+  {
+    "question": "Which instructor teaches the Databases course?",
+    "gold_sql": "SELECT i.name FROM instructors AS i JOIN course_offerings AS o ON o.instructor_id = i.id JOIN courses AS c ON c.id = o.course_id WHERE c.title = 'Databases';"
+  }
+]

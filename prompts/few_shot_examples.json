@@ -1,0 +1,63 @@
+[
+  {
+    "question": "List the names of all students.",
+    "schema": "Table students: id INTEGER PRIMARY KEY, name TEXT, age INTEGER, department_id INTEGER",
+    "entities": ["students", "name"],
+    "schema_mapping": [
+      "students -> table students",
+      "name -> students.name"
+    ],
+    "trc": "{ s.name | students(s) }",
+    "sql": "SELECT s.name FROM students AS s;"
+  },
+  {
+    "question": "Show each student name with the title of the course they enrolled in.",
+    "schema": "Table students: id INTEGER PRIMARY KEY, name TEXT\nTable enrollments: id INTEGER PRIMARY KEY, student_id INTEGER, course_id INTEGER\nTable courses: id INTEGER PRIMARY KEY, title TEXT",
+    "entities": ["students", "courses", "enrollments"],
+    "schema_mapping": [
+      "students -> table students",
+      "enrollments.student_id -> students.id",
+      "enrollments.course_id -> courses.id",
+      "title -> courses.title"
+    ],
+    "trc": "{ s.name, c.title | students(s) AND enrollments(e) AND courses(c) AND e.student_id = s.id AND e.course_id = c.id }",
+    "sql": "SELECT s.name, c.title FROM students AS s JOIN enrollments AS e ON e.student_id = s.id JOIN courses AS c ON e.course_id = c.id;"
+  },
+  {
+    "question": "How many students are in each department?",
+    "schema": "Table students: id INTEGER PRIMARY KEY, department_id INTEGER\nTable departments: id INTEGER PRIMARY KEY, name TEXT",
+    "entities": ["students", "departments", "count"],
+    "schema_mapping": [
+      "students.department_id -> departments.id",
+      "name -> departments.name",
+      "count students -> COUNT(students.id)"
+    ],
+    "trc": "{ d.name, COUNT(s.id) | departments(d) AND students(s) AND s.department_id = d.id }",
+    "sql": "SELECT d.name, COUNT(s.id) AS student_count FROM departments AS d JOIN students AS s ON s.department_id = d.id GROUP BY d.name;"
+  },
+  {
+    "question": "List the students who are enrolled in a course worth more than 3 credits.",
+    "schema": "Table students: id INTEGER PRIMARY KEY, name TEXT\nTable enrollments: student_id INTEGER, course_id INTEGER\nTable courses: id INTEGER PRIMARY KEY, credits INTEGER",
+    "entities": ["students", "courses", "credits > 3"],
+    "schema_mapping": [
+      "students.id <- enrollments.student_id",
+      "enrollments.course_id -> courses.id",
+      "courses.credits -> filter > 3"
+    ],
+    "trc": "{ s.name | students(s) AND EXISTS e (enrollments(e) AND e.student_id = s.id AND EXISTS c (courses(c) AND c.id = e.course_id AND c.credits > 3)) }",
+    "sql": "SELECT s.name FROM students AS s WHERE EXISTS (SELECT 1 FROM enrollments AS e WHERE e.student_id = s.id AND EXISTS (SELECT 1 FROM courses AS c WHERE c.id = e.course_id AND c.credits > 3));"
+  },
+  {
+    "question": "Which instructor teaches the Databases course?",
+    "schema": "Table instructors: id INTEGER PRIMARY KEY, name TEXT\nTable course_offerings: course_id INTEGER, instructor_id INTEGER\nTable courses: id INTEGER PRIMARY KEY, title TEXT",
+    "entities": ["instructors", "course_offerings", "courses", "Databases"],
+    "schema_mapping": [
+      "course_offerings.instructor_id -> instructors.id",
+      "course_offerings.course_id -> courses.id",
+      "name -> instructors.name",
+      "Databases -> courses.title"
+    ],
+    "trc": "{ i.name | instructors(i) AND EXISTS o (course_offerings(o) AND o.instructor_id = i.id AND EXISTS c (courses(c) AND c.id = o.course_id AND c.title = 'Databases')) }",
+    "sql": "SELECT i.name FROM instructors AS i WHERE EXISTS (SELECT 1 FROM course_offerings AS o WHERE o.instructor_id = i.id AND EXISTS (SELECT 1 FROM courses AS c WHERE c.id = o.course_id AND c.title = 'Databases'));"
+  }
+]

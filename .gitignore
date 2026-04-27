@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and local settings
+.env
+.env.*
+*.log
+
+# Streamlit and editor state
+.streamlit/secrets.toml
+.vscode/
+
+# Generated data and uploads
+data/uploads/
+data/exports/
+
+# Large benchmark datasets should be downloaded locally, not committed.
+data/spider_data/
+data/dev/
+
+# Model artifacts
+models/text2sql-lora/
+models/checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# OS files
+.DS_Store
+Thumbs.db
