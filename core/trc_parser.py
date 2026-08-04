@@ -13,6 +13,7 @@ class Token:
     kind: str
     value: str
     position: int
+    raw: str = ""
 
 
 @dataclass(frozen=True)
@@ -27,13 +28,18 @@ class Literal:
 
 
 @dataclass(frozen=True)
+class Star:
+    """The ``*`` argument of ``COUNT(*)``; valid only inside an aggregate."""
+
+
+@dataclass(frozen=True)
 class Aggregate:
     function: str
     expression: "Expression"
     distinct: bool = False
 
 
-Expression = AttributeRef | Literal | Aggregate
+Expression = AttributeRef | Literal | Aggregate | Star
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,7 @@ TOKEN_PATTERN = re.compile(
     |(?P<RBRACE>\})
     |(?P<LPAREN>\()
     |(?P<RPAREN>\))
+    |(?P<STAR>\*)
     |(?P<COMMA>,)
     |(?P<PIPE>\|)
     |(?P<DOT>\.)
@@ -111,11 +118,14 @@ def tokenize(text: str) -> list[Token]:
         value = match.group()
         if kind != "SPACE":
             if kind == "IDENT" and value.upper() in KEYWORDS:
-                tokens.append(Token("KEYWORD", value.upper(), position))
+                # ``value`` is upper-cased so keyword matching stays case-insensitive,
+                # while ``raw`` preserves the original spelling for identifier positions
+                # (a column may legitimately be named "count" or "order").
+                tokens.append(Token("KEYWORD", value.upper(), position, value))
             else:
-                tokens.append(Token(kind, value, position))
+                tokens.append(Token(kind, value, position, value))
         position = match.end()
-    tokens.append(Token("EOF", "", position))
+    tokens.append(Token("EOF", "", position, ""))
     return tokens
 
 
@@ -205,7 +215,10 @@ class TrcParser:
             function = self.expect("KEYWORD").value
             self.expect("LPAREN")
             distinct = bool(self.match("KEYWORD", "DISTINCT"))
-            expression = self.parse_expression()
+            if self.match("STAR"):
+                expression: Expression = Star()
+            else:
+                expression = self.parse_expression()
             self.expect("RPAREN")
             return Aggregate(function, expression, distinct)
         if token.kind == "STRING":
@@ -226,6 +239,11 @@ class TrcParser:
             return self.expect("IDENT").value
         if token.kind == "STRING":
             return self.expect("STRING").value[1:-1]
+        if token.kind == "KEYWORD":
+            # Identifier positions are unambiguous, so a table or column named after a
+            # keyword (Spider ships a "count" column) is accepted with its original spelling.
+            self.index += 1
+            return token.raw or token.value
         raise TrcSyntaxError(f"Expected identifier at position {token.position}, found {token.value!r}")
 
     def _looks_like_relation(self) -> bool:

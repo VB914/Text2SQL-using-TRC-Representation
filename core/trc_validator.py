@@ -14,6 +14,7 @@ from core.trc_parser import (
     Not,
     Or,
     RelationPredicate,
+    Star,
     TrcSyntaxError,
     expression_variables,
     flatten_and,
@@ -25,11 +26,9 @@ from models import SchemaResponse, ValidationIssue, ValidationReport
 def validate_trc(trc: str, schema: SchemaResponse) -> ValidationReport:
     issues: list[ValidationIssue] = []
     text = trc.strip()
-    if text.count("{") != text.count("}"):
-        issues.append(ValidationIssue(level="error", message="Unbalanced curly braces.", location="syntax"))
-    if text.count("(") != text.count(")"):
-        issues.append(ValidationIssue(level="error", message="Unbalanced parentheses.", location="syntax"))
-
+    # Bracket balance is not counted here: the parser already reports unbalanced
+    # delimiters with an exact position, and naive counting misfires on brackets
+    # that appear inside string literals.
     try:
         query = parse_trc(text)
     except TrcSyntaxError as exc:
@@ -53,14 +52,19 @@ def validate_trc(trc: str, schema: SchemaResponse) -> ValidationReport:
 
 
 def heuristic_repair_trc(trc: str) -> str:
+    """Normalise surface noise around a TRC expression.
+
+    This deliberately performs no structural repair. Appending parentheses to
+    balance a count produces an expression that parses but means something the
+    author never wrote, which is worse than a clean validation failure.
+    Structural repair belongs in the schema-aware repair pass.
+    """
     text = re.sub(r"^TRC\s*:\s*", "", trc.strip(), flags=re.IGNORECASE)
     text = text.replace("```", "").strip()
     if not text.startswith("{"):
         text = "{ " + text
     if not text.endswith("}"):
         text = text + " }"
-    if text.count("(") > text.count(")"):
-        text += ")" * (text.count("(") - text.count(")"))
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -111,9 +115,19 @@ def _validate_expression(
     bindings: dict[str, str],
     columns: dict[str, set[str]],
     issues: list[ValidationIssue],
+    inside_aggregate: bool = False,
 ) -> None:
-    if isinstance(expression, Aggregate):
-        _validate_expression(expression.expression, bindings, columns, issues)
+    if isinstance(expression, Star):
+        if not inside_aggregate:
+            issues.append(
+                ValidationIssue(
+                    level="error",
+                    message="'*' is only allowed as the argument of an aggregate, such as COUNT(*).",
+                    location="projection",
+                )
+            )
+    elif isinstance(expression, Aggregate):
+        _validate_expression(expression.expression, bindings, columns, issues, inside_aggregate=True)
     elif isinstance(expression, AttributeRef):
         table = bindings.get(expression.variable)
         if not table:

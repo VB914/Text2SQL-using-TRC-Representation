@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections import defaultdict
+from contextlib import closing
 from pathlib import Path
 
 from core.config import get_settings
@@ -39,7 +40,9 @@ def list_database_options() -> list[str]:
 def load_schema(db_path: str | None) -> SchemaResponse:
     path = resolve_db_path(db_path)
     LOGGER.info("Loading schema for %s", path)
-    with sqlite3.connect(path) as connection:
+    # ``closing`` is required: sqlite3's own context manager commits a transaction
+    # but never closes the connection, which leaks handles and keeps the file locked.
+    with closing(sqlite3.connect(path)) as connection:
         cursor = connection.cursor()
         tables = []
         for table_name in _table_names(cursor):
@@ -149,8 +152,26 @@ def _foreign_keys(cursor: sqlite3.Cursor, table_name: str) -> list[ForeignKeyInf
     ]
 
 
+def _primary_key_column(table: TableInfo) -> str | None:
+    """Return the single-column primary key of ``table``, if it has exactly one.
+
+    Composite keys are rejected because a naming-convention guess cannot say
+    which part of the key a ``*_id`` column refers to.
+    """
+    primary_keys = [column.name for column in table.columns if column.primary_key]
+    if len(primary_keys) == 1:
+        return primary_keys[0]
+    if primary_keys:
+        return None
+    for column in table.columns:
+        if column.name.lower() == "id":
+            return column.name
+    return None
+
+
 def _infer_foreign_keys(tables: list[TableInfo]) -> list[ForeignKeyInfo]:
     inferred = []
+    by_name = {table.name: table for table in tables}
     table_names = {table.name.lower(): table.name for table in tables}
     singular_names = {singular(table.name).lower(): table.name for table in tables}
     name_map = {**table_names, **singular_names}
@@ -159,14 +180,20 @@ def _infer_foreign_keys(tables: list[TableInfo]) -> list[ForeignKeyInfo]:
             if column.primary_key or not column.name.lower().endswith("_id"):
                 continue
             target_table = name_map.get(column.name[:-3].lower())
-            if target_table and target_table != table.name:
-                inferred.append(
-                    ForeignKeyInfo(
-                        source_table=table.name,
-                        source_column=column.name,
-                        target_table=target_table,
-                        target_column="id",
-                        inferred=True,
-                    )
+            if not target_table or target_table == table.name:
+                continue
+            # Resolve the real primary key instead of assuming "id"; guessing a
+            # column name that does not exist produces joins that cannot execute.
+            target_column = _primary_key_column(by_name[target_table])
+            if not target_column:
+                continue
+            inferred.append(
+                ForeignKeyInfo(
+                    source_table=table.name,
+                    source_column=column.name,
+                    target_table=target_table,
+                    target_column=target_column,
+                    inferred=True,
                 )
+            )
     return inferred

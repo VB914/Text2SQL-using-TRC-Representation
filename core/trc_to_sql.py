@@ -13,6 +13,7 @@ from core.trc_parser import (
     Not,
     Or,
     RelationPredicate,
+    Star,
     expression_variables,
     flatten_and,
     parse_trc,
@@ -103,6 +104,8 @@ def _render_formula(formula: Formula) -> str:
 def _render_expression(expression: Expression) -> str:
     if isinstance(expression, AttributeRef):
         return f"{expression.variable}.{_quote_identifier(expression.attribute)}"
+    if isinstance(expression, Star):
+        return "*"
     if isinstance(expression, Aggregate):
         distinct = "DISTINCT " if expression.distinct else ""
         return f"{expression.function}({distinct}{_render_expression(expression.expression)})"
@@ -114,6 +117,8 @@ def _render_expression(expression: Expression) -> str:
 
 def _aggregate_alias(expression: Aggregate) -> str:
     inner = expression.expression
+    if isinstance(inner, Star):
+        return f"{expression.function.lower()}_star"
     if isinstance(inner, AttributeRef):
         safe_name = re.sub(r"[^A-Za-z0-9_]+", "_", inner.attribute).strip("_")
         return f"{expression.function.lower()}_{safe_name or 'value'}"

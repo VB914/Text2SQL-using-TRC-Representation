@@ -29,6 +29,7 @@ class Settings:
     auto_spider_few_shots: bool = os.getenv("TEXT2SQL_AUTO_SPIDER_FEWSHOTS", "1") == "1"
     spider_few_shot_count: int = int(os.getenv("TEXT2SQL_SPIDER_FEWSHOT_COUNT", "6"))
     max_result_rows: int = int(os.getenv("TEXT2SQL_MAX_RESULT_ROWS", "200"))
+    sql_timeout_seconds: float = float(os.getenv("TEXT2SQL_SQL_TIMEOUT_SECONDS", "10"))
     log_level: str = os.getenv("TEXT2SQL_LOG_LEVEL", "INFO")
 
 
