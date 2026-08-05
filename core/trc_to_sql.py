@@ -45,7 +45,16 @@ def trc_to_sql(trc_text: str, schema: SchemaResponse | None = None) -> str:
     # Grouping is required whenever an aggregate appears anywhere, including in a
     # restriction. Deriving it only from the projection list produces a HAVING
     # clause with no GROUP BY, which silently collapses the result to one row.
-    needs_group_by = any(_contains_aggregate(item) for item in query.projections) or bool(having_clause)
+    # An aggregate used only for ranking still implies grouping: "the stadium with
+    # the most concerts" projects stadium columns and orders by COUNT(*).
+    orders_by_aggregate = bool(
+        query.shaping and any(_contains_aggregate(key.expression) for key in query.shaping.order_by)
+    )
+    needs_group_by = (
+        any(_contains_aggregate(item) for item in query.projections)
+        or bool(having_clause)
+        or orders_by_aggregate
+    )
     if needs_group_by and group_keys:
         parts.append("GROUP BY " + ", ".join(group_keys))
     if having_clause:

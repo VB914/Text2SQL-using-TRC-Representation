@@ -22,5 +22,11 @@ def test_grouped_count_query_uses_entity_name_and_count() -> None:
     assert response.sql is not None
     assert "GROUP BY s.Name" in response.sql
     assert response.execution_result is not None
-    assert {"Name", "count_concert_ID"} <= set(response.execution_result.columns)
+
+    # The count column is aliased from whatever is being counted, so assert on the
+    # shape of the answer rather than on the generated alias.
+    columns = response.execution_result.columns
+    assert "Name" in columns
+    assert any(column.startswith("count_") for column in columns)
     assert response.execution_result.row_count == 5
+    assert all(row["Name"] and row[columns[1]] > 0 for row in response.execution_result.rows)

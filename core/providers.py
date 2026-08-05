@@ -8,6 +8,21 @@ from functools import lru_cache
 
 from core.config import get_settings
 from core.prompt_builder import load_few_shot_examples
+from core.question_hints import (
+    OrderingHint,
+    asks_for_distinct,
+    detect_aggregates,
+    detect_comparison,
+    detect_ordering,
+    superlative_column_words,
+)
+from core.schema_linker import (
+    build_value_index,
+    find_mentioned_columns,
+    is_numeric_column,
+    link_columns,
+    link_values,
+)
 from core.schema_utils import singular
 from core.trc_parser import And, Exists, Formula, Not, Or, RelationPredicate, parse_trc
 from core.trc_to_sql import trc_to_sql
@@ -77,7 +92,9 @@ class RuleBasedProvider:
 
         asks_count = bool(re.search(r"\b(how many|count|number of|total)\b", question, re.IGNORECASE))
         group_hint = bool(re.search(r"\b(each|per|by|for every)\b", question, re.IGNORECASE))
-        selected = tables[:2] if len(tables) > 1 else tables[:1]
+
+        value_matches = _linked_values(question, schema)
+        selected = _select_tables(question, schema, tables, value_matches)
         count_table, group_table = _count_group_tables(question, schema.tables, selected) if asks_count else (None, None)
 
         if asks_count and group_hint and count_table and group_table and count_table.name != group_table.name:
@@ -86,38 +103,98 @@ class RuleBasedProvider:
         else:
             relation_tables = _expand_join_tables(selected, schema)
 
+        # The counted and grouped tables are chosen from the whole schema, so they are
+        # not guaranteed to be among the joined relations. Without this the alias
+        # lookup below raises KeyError and the generator dies on the question.
+        relation_names = {table.name for table in relation_tables}
+        if count_table and count_table.name not in relation_names:
+            count_table = next((table for table in relation_tables if table.name == count_table.name), None) or (
+                relation_tables[0] if relation_tables else None
+            )
+        if group_table and group_table.name not in relation_names:
+            group_table = None
+            group_hint = False
+
         aliases = _aliases(relation_tables)
         predicates = [f"{table.name}({aliases[table.name]})" for table in relation_tables]
         predicates.extend(_join_predicates(relation_tables, aliases))
-        predicates.extend(_filter_predicates(question, relation_tables, aliases))
+
+        # Columns consumed by a filter are not also projected, so "countries where
+        # singers are above age 20" selects the country and not the age.
+        filtered_columns: set[tuple[str, str]] = set()
+        predicates.extend(
+            _filter_predicates(question, relation_tables, aliases, value_matches, filtered_columns)
+        )
+
+        mentioned = [
+            (table, column)
+            for table, column in find_mentioned_columns(question, relation_tables)
+            if table.name in aliases and (table.name, column) not in filtered_columns
+        ]
+        aggregates = detect_aggregates(question)
+
+        ordering = detect_ordering(question)
+        # "the stadium with the most concerts" asks for the stadium, ranked by a
+        # count. The count belongs in ORDER BY, not in the projection list.
+        ranks_by_count = bool(
+            asks_count and mentioned and ordering is not None and ordering.limit is not None
+        )
 
         projections: list[str]
         mappings: list[str] = []
-        if asks_count:
-            counted = count_table or selected[0]
-            count_col = _primary_key(counted) or counted.columns[0].name
-            if group_hint and (group_table or len(selected) > 1):
-                grouped = group_table or selected[1]
-                group_col = _display_column(grouped) or grouped.columns[0].name
+        if ranks_by_count:
+            projections = [
+                _attribute(aliases[table.name], column) for table, column in mentioned[:2]
+            ]
+            mappings.append("ranked by COUNT(*)")
+        elif aggregates and mentioned:
+            # "the average, minimum and maximum age" is three aggregates over one column.
+            table, column = mentioned[0]
+            attribute = _attribute(aliases[table.name], column)
+            projections = [f"{function}({attribute})" for function in aggregates]
+            mappings.append(f"aggregate {'/'.join(aggregates)} -> {table.name}.{column}")
+        elif asks_count:
+            counted = count_table or _first_in(relation_tables, selected)
+            grouped = _grouping_target(mentioned, group_table, relation_tables, selected, aliases, group_hint)
+            if grouped is not None:
+                grouped_table, group_col = grouped
                 projections = [
-                    _attribute(aliases[grouped.name], group_col),
-                    f"COUNT({_attribute(aliases[counted.name], count_col)})",
+                    _attribute(aliases[grouped_table.name], group_col),
+                    "COUNT(*)",
                 ]
-                mappings.extend([f"count target -> {counted.name}.{count_col}", f"grouping -> {grouped.name}.{group_col}"])
+                mappings.append(f"grouping -> {grouped_table.name}.{group_col}")
             else:
-                projections = [f"COUNT({_attribute(aliases[counted.name], count_col)})"]
-                mappings.append(f"count target -> {counted.name}.{count_col}")
+                # Counting rows of a single relation is COUNT(*) in the gold queries.
+                projections = ["COUNT(*)"]
+                mappings.append(f"count target -> rows of {counted.name}")
         else:
             projections = []
-            for table in selected[:2]:
-                column = _display_column(table) or _primary_key(table) or table.columns[0].name
-                projections.append(_attribute(aliases[table.name], column))
-                mappings.append(f"projection -> {table.name}.{column}")
+            for table, column in mentioned[:4]:
+                rendered = _attribute(aliases[table.name], column)
+                if rendered not in projections:
+                    projections.append(rendered)
+                    mappings.append(f"projection -> {table.name}.{column}")
             if not projections:
-                first = selected[0]
-                projections.append(_attribute(aliases[first.name], first.columns[0].name))
+                primary = _first_in(relation_tables, selected)
+                column = _display_column(primary) or _primary_key(primary) or primary.columns[0].name
+                projections.append(_attribute(aliases[primary.name], column))
+                mappings.append(f"projection -> {primary.name}.{column}")
 
-        trc = "{ " + ", ".join(projections) + " | " + " AND ".join(predicates) + " }"
+        distinct = "DISTINCT " if asks_for_distinct(question) and not asks_count and not aggregates else ""
+        trc = "{ " + distinct + ", ".join(projections) + " | " + " AND ".join(predicates) + " }"
+
+        if ranks_by_count:
+            direction = " DESC" if ordering.descending else ""
+            shaping = f" ORDER BY COUNT(*){direction} LIMIT {ordering.limit}"
+        elif aggregates:
+            # "the maximum age" is an aggregate, not a request to sort and take one row.
+            shaping = ""
+        else:
+            shaping = _shaping_clause(question, relation_tables, aliases, projections, asks_count)
+        if shaping:
+            trc += shaping
+            mappings.append(f"shaping -> {shaping.strip()}")
+
         sql = None
         try:
             sql = trc_to_sql(trc, schema)
@@ -201,6 +278,101 @@ class HybridProvider:
 @lru_cache(maxsize=1)
 def get_provider() -> HybridProvider:
     return HybridProvider()
+
+
+def _linked_values(question: str, schema: SchemaResponse) -> list:
+    """Values from the question that exist in the database, or an empty list."""
+    try:
+        index = build_value_index(schema.db_path)
+    except Exception:
+        LOGGER.debug("Value index unavailable; continuing without value linking.", exc_info=True)
+        return []
+    return link_values(question, index, schema.tables)
+
+
+_NAME_GLUE = frozenset({"in", "of", "to", "and", "the", "by", "for"})
+
+
+def _mentions_table(question: str, table: TableInfo) -> bool:
+    """True only when the question names the whole table, not just part of it.
+
+    Partial overlap is not enough: "how many singers" shares the token "singer"
+    with ``singer_in_concert``, and admitting that bridge table adds a join that
+    multiplies rows and corrupts the count.
+    """
+    if _is_bridge_table(table):
+        return False
+    tokens = _token_set(question)
+    name_tokens = {token for token in _tokens(table.name) if token not in _NAME_GLUE}
+    if not name_tokens:
+        return False
+    return all(
+        token in tokens or _singular_token(token) in tokens for token in name_tokens
+    )
+
+
+def _select_tables(
+    question: str,
+    schema: SchemaResponse,
+    ranked: list[TableInfo],
+    value_matches: list,
+) -> list[TableInfo]:
+    """Choose the relations the query needs, based on evidence rather than rank alone.
+
+    Previously the top two ranked tables were always taken, which forced a join into
+    single-table questions. An unnecessary join changes the row multiset and quietly
+    corrupts counts, so a second relation is only admitted when the question actually
+    points at it.
+    """
+    by_name = {table.name: table for table in schema.tables}
+    primary = ranked[0]
+    selected = [primary]
+
+    # A value matched in another table means that table has to be present.
+    for match in value_matches:
+        table = by_name.get(match.table)
+        if table and table.name not in {item.name for item in selected}:
+            selected.append(table)
+
+    if len(selected) == 1:
+        for candidate in ranked[1:]:
+            if _mentions_table(question, candidate) and candidate.name != primary.name:
+                selected.append(candidate)
+                break
+
+    return selected[:3]
+
+
+def _grouping_target(
+    mentioned: list[tuple[TableInfo, str]],
+    group_table: TableInfo | None,
+    relation_tables: list[TableInfo],
+    selected: list[TableInfo],
+    aliases: dict[str, str],
+    group_hint: bool,
+) -> tuple[TableInfo, str] | None:
+    """The column to group by, preferring one the question actually names."""
+    if not group_hint:
+        return None
+    if mentioned:
+        return mentioned[0]
+    if group_table and group_table.name in aliases:
+        column = _display_column(group_table) or group_table.columns[0].name
+        return group_table, column
+    fallback = _first_in(relation_tables, selected[1:]) if len(selected) > 1 else None
+    if fallback is not None:
+        column = _display_column(fallback) or fallback.columns[0].name
+        return fallback, column
+    return None
+
+
+def _first_in(available: list[TableInfo], preferred: list[TableInfo]) -> TableInfo:
+    """Pick the first preferred table that is actually available, else the first available."""
+    names = {table.name for table in available}
+    for table in preferred:
+        if table.name in names:
+            return table
+    return available[0]
 
 
 def _rank_tables(question: str, tables: list[TableInfo]) -> list[TableInfo]:
@@ -360,27 +532,140 @@ def _join_predicates(tables: list[TableInfo], aliases: dict[str, str]) -> list[s
     return predicates
 
 
-def _filter_predicates(question: str, tables: list[TableInfo], aliases: dict[str, str]) -> list[str]:
-    filters = []
+def _shaping_clause(
+    question: str,
+    tables: list[TableInfo],
+    aliases: dict[str, str],
+    projections: list[str],
+    asks_count: bool,
+) -> str:
+    """Translate ordering intent into the TRC shaping clause, if any."""
+    hint = detect_ordering(question)
+    if hint is None:
+        return ""
+
+    key = _ordering_key(hint, tables, aliases, projections, asks_count, question)
+    if not key:
+        # A bare LIMIT without an ordering is rarely what the question meant.
+        return f" LIMIT {hint.limit}" if hint.limit else ""
+
+    clause = f" ORDER BY {key}" + (" DESC" if hint.descending else "")
+    if hint.limit:
+        clause += f" LIMIT {hint.limit}"
+    return clause
+
+
+def _ordering_key(
+    hint: OrderingHint,
+    tables: list[TableInfo],
+    aliases: dict[str, str],
+    projections: list[str],
+    asks_count: bool,
+    question: str = "",
+) -> str:
+    if hint.by_count:
+        # "most common X" ranks groups by their size.
+        return "COUNT(*)" if not asks_count else next(
+            (item for item in projections if item.startswith("COUNT(")), "COUNT(*)"
+        )
+
+    if asks_count:
+        aggregate = next((item for item in projections if item.startswith("COUNT(")), None)
+        if aggregate:
+            return aggregate
+
+    if hint.measure_phrase:
+        for table, column_name in find_mentioned_columns(hint.measure_phrase, tables):
+            if table.name in aliases:
+                return _attribute(aliases[table.name], column_name)
+
+    # "youngest" names no column but implies one. This is checked before the loose
+    # name-overlap fallback, which would happily rank "youngest singer" by Singer_ID.
+    for word in superlative_column_words(question):
+        for table in tables:
+            if table.name not in aliases:
+                continue
+            for column in table.columns:
+                if word in _normalize(column.name).split() and is_numeric_column(column.data_type):
+                    return _attribute(aliases[table.name], column.name)
+
+    if hint.measure_phrase:
+        for table, column_name in link_columns(hint.measure_phrase, tables):
+            if table.name in aliases:
+                return _attribute(aliases[table.name], column_name)
+
+    if hint.alphabetical:
+        for table in tables:
+            column = _display_column(table)
+            if column and table.name in aliases:
+                return _attribute(aliases[table.name], column)
+
+    # Fall back to ordering by whatever the query already projects.
+    return projections[0] if projections else ""
+
+
+def _filter_predicates(
+    question: str,
+    tables: list[TableInfo],
+    aliases: dict[str, str],
+    value_matches: list,
+    used_columns: set[tuple[str, str]] | None = None,
+) -> list[str]:
+    filters: list[str] = []
+    used_columns = used_columns if used_columns is not None else set()
+
+    # Values quoted in the question are unambiguous, so they are trusted first.
     for value in re.findall(r"['\"]([^'\"]+)['\"]", question):
         target = _best_text_column(question, tables)
         if target:
             table, column = target
-            filters.append(f"{_attribute(aliases[table.name], column.name)} = '{value}'")
+            filters.append(f"{_attribute(aliases[table.name], column.name)} = '{_escape(value)}'")
+            used_columns.add((table.name, column.name))
 
-    number_match = re.search(r"\b(\d+(?:\.\d+)?)\b", question)
-    if number_match:
-        value = number_match.group(1)
-        operator = ">"
-        if re.search(r"\b(less|under|below|younger|fewer)\b", question, re.IGNORECASE):
-            operator = "<"
-        elif re.search(r"\b(equal|exactly|is|are)\b", question, re.IGNORECASE):
-            operator = "="
-        target = _best_numeric_column(question, tables)
-        if target:
-            table, column = target
-            filters.append(f"{_attribute(aliases[table.name], column.name)} {operator} {value}")
+    for match in value_matches:
+        if match.table not in aliases or (match.table, match.column) in used_columns:
+            continue
+        attribute = _attribute(aliases[match.table], match.column)
+        if match.exact:
+            filters.append(f"{attribute} = '{_escape(match.value)}'")
+        else:
+            filters.append(f"{attribute} LIKE '%{_escape(match.value)}%'")
+        used_columns.add((match.table, match.column))
+
+    filters.extend(_numeric_filters(question, tables, aliases, used_columns))
     return filters
+
+
+def _numeric_filters(
+    question: str,
+    tables: list[TableInfo],
+    aliases: dict[str, str],
+    used_columns: set[tuple[str, str]],
+) -> list[str]:
+    hint = detect_comparison(question)
+    if hint is None:
+        return []
+
+    # Prefer a numeric column the question actually names; falling back to the first
+    # numeric column produced filters such as "Singer_ID > 20" for "age above 20".
+    for table, column_name in find_mentioned_columns(question, tables):
+        column = next((item for item in table.columns if item.name == column_name), None)
+        if column and is_numeric_column(column.data_type) and (table.name, column.name) not in used_columns:
+            used_columns.add((table.name, column.name))
+            return [f"{_attribute(aliases[table.name], column.name)} {hint.operator} {hint.value}"]
+
+    target = _best_numeric_column(question, tables)
+    if not target:
+        return []
+    table, column = target
+    if not is_numeric_column(column.data_type) or (table.name, column.name) in used_columns:
+        return []
+    used_columns.add((table.name, column.name))
+    return [f"{_attribute(aliases[table.name], column.name)} {hint.operator} {hint.value}"]
+
+
+def _escape(value: str) -> str:
+    return value.replace("'", "''")
 
 
 def _best_text_column(question: str, tables: list[TableInfo]):

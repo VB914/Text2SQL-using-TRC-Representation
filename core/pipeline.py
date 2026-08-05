@@ -7,6 +7,7 @@ from core.prompt_builder import build_repair_prompt, build_trc_prompt, prompt_su
 from core.providers import get_provider
 from core.schema_utils import load_schema
 from core.sql_executor import execute_sql
+from core.trc_repair import repair_trc
 from core.trc_to_sql import trc_to_sql
 from core.trc_validator import heuristic_repair_trc, validate_trc
 from models import PipelineRequest, PipelineResponse, ValidationReport
@@ -92,11 +93,28 @@ def run_trc_pipeline(request: PipelineRequest) -> PipelineResponse:
 
 def _repair_once(provider, question, schema, trc: str, validation: ValidationReport) -> tuple[str, ValidationReport]:
     errors = [issue.message for issue in validation.issues if issue.level == "error"]
+
+    # Schema-aware repair first: it fixes the common cases (wrong case, near-miss
+    # table and column names) deterministically.
+    schema_repaired = repair_trc(trc, schema, validation)
+    if schema_repaired != trc:
+        report = validate_trc(schema_repaired, schema)
+        if _error_count(report) < _error_count(validation):
+            report.repaired_trc = schema_repaired
+            return schema_repaired, report
+
     repair_prompt = build_repair_prompt(question, schema, trc, errors)
     repaired = heuristic_repair_trc(provider.repair_trc(question, schema, trc, errors, repair_prompt))
     report = validate_trc(repaired, schema)
+    # Never accept a rewrite that leaves the expression in a worse state.
+    if _error_count(report) > _error_count(validation):
+        return trc, validation
     report.repaired_trc = repaired if repaired != trc else None
     return repaired, report
+
+
+def _error_count(report: ValidationReport) -> int:
+    return sum(1 for issue in report.issues if issue.level == "error")
 
 
 def _request_db_path(request: PipelineRequest) -> str | None:

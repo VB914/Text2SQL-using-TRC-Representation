@@ -16,6 +16,7 @@ class Settings:
     prompt_dir: Path = PROJECT_ROOT / "prompts"
     uploads_dir: Path = PROJECT_ROOT / "data" / "uploads"
     exports_dir: Path = PROJECT_ROOT / "data" / "exports"
+    cache_dir: Path = PROJECT_ROOT / "data" / "cache"
     sample_db_path: Path = PROJECT_ROOT / "data" / "sample.db"
     sample_questions_path: Path = PROJECT_ROOT / "data" / "sample_questions.json"
     spider_root: Path = PROJECT_ROOT / "data" / "spider_data" / "spider_data"
@@ -30,6 +31,8 @@ class Settings:
     spider_few_shot_count: int = int(os.getenv("TEXT2SQL_SPIDER_FEWSHOT_COUNT", "6"))
     max_result_rows: int = int(os.getenv("TEXT2SQL_MAX_RESULT_ROWS", "200"))
     sql_timeout_seconds: float = float(os.getenv("TEXT2SQL_SQL_TIMEOUT_SECONDS", "10"))
+    value_index_enabled: bool = os.getenv("TEXT2SQL_VALUE_INDEX_ENABLED", "1") == "1"
+    value_index_max_rows: int = int(os.getenv("TEXT2SQL_VALUE_INDEX_MAX_ROWS", "2000"))
     log_level: str = os.getenv("TEXT2SQL_LOG_LEVEL", "INFO")
 
 
@@ -38,4 +41,5 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     settings.exports_dir.mkdir(parents=True, exist_ok=True)
+    settings.cache_dir.mkdir(parents=True, exist_ok=True)
     return settings

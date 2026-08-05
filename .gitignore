@@ -39,3 +39,6 @@ models/checkpoints/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated value-index cache
+data/cache/

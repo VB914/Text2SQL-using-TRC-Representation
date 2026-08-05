@@ -72,7 +72,10 @@ def heuristic_repair_trc(trc: str) -> str:
     text = text.replace("```", "").strip()
     if not text.startswith("{"):
         text = "{ " + text
-    if not text.endswith("}"):
+    # A closing brace is only missing when the braces are genuinely unbalanced.
+    # Testing for a trailing "}" is wrong, because a valid query may end with a
+    # shaping clause such as "ORDER BY s.age" that sits outside the braces.
+    if text.count("{") > text.count("}"):
         text = text + " }"
     return re.sub(r"\s+", " ", text).strip()
 
