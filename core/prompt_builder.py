@@ -31,13 +31,25 @@ Required reasoning order:
 {chr(10).join(PIPELINE_STEPS)}
 
 TRC grammar used in this project:
-- Query: {{ projection_list | formula }}
+- Query: {{ projection_list | formula }} with an optional shaping clause after the closing brace
 - Relation predicate: table_alias_name(tuple_variable), for example students(s)
 - Attribute reference: variable.attribute, for example s.name
 - Quoted attributes are allowed for complex schema names: f."County Name"
 - Connectives: AND, OR, NOT, EXISTS x (...)
 - Comparisons: =, !=, <, <=, >, >=
-- Aggregates: COUNT(x.attribute), SUM(x.attribute), AVG(x.attribute), MIN(x.attribute), MAX(x.attribute)
+- Aggregates: COUNT(*), COUNT(x.attribute), SUM(...), AVG(...), MIN(...), MAX(...)
+- Duplicate removal: {{ DISTINCT s.name | students(s) }}
+- Pattern match: s.name LIKE 'A%' and s.name NOT LIKE 'A%'
+- Membership against a value list: s.dept IN ('CS', 'EE')
+- Membership against a set: s.id IN {{ e.student_id | enrollments(e) }}
+- Range: s.age BETWEEN 18 AND 25
+- Null tests: s.email IS NULL, s.email IS NOT NULL
+- Ordering and truncation are written AFTER the closing brace, because the braces
+  denote an unordered set:
+  {{ s.name | students(s) }} ORDER BY s.gpa DESC LIMIT 5
+- Do not write HAVING. A condition that contains an aggregate is automatically
+  applied after grouping, so write it as an ordinary conjunct:
+  {{ d.name | departments(d) AND students(s) AND s.department_id = d.id AND COUNT(s.id) > 5 }}
 
 Few-shot examples:
 {examples}

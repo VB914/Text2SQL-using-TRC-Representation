@@ -8,14 +8,21 @@ from core.trc_parser import (
     Aggregate,
     And,
     AttributeRef,
+    Between,
     Comparison,
     Exists,
     Formula,
+    IsNull,
+    Like,
+    Membership,
     Not,
     Or,
     RelationPredicate,
+    SetComprehension,
     Star,
+    TrcQuery,
     TrcSyntaxError,
+    ValueList,
     expression_variables,
     flatten_and,
     parse_trc,
@@ -42,6 +49,8 @@ def validate_trc(trc: str, schema: SchemaResponse) -> ValidationReport:
         _validate_expression(projection, bindings, columns, issues)
     _validate_formula(query.formula, bindings, tables, columns, issues)
     _check_join_consistency(query.formula, bindings, issues)
+    _validate_shaping(query, bindings, columns, issues)
+    _validate_grouping(query, issues)
 
     return ValidationReport(
         valid=not any(issue.level == "error" for issue in issues),
@@ -96,6 +105,16 @@ def _validate_formula(
     if isinstance(formula, Comparison):
         _validate_expression(formula.left, bindings, columns, issues)
         _validate_expression(formula.right, bindings, columns, issues)
+    elif isinstance(formula, Like):
+        _validate_expression(formula.expression, bindings, columns, issues)
+    elif isinstance(formula, IsNull):
+        _validate_expression(formula.expression, bindings, columns, issues)
+    elif isinstance(formula, Between):
+        for part in (formula.expression, formula.lower, formula.upper):
+            _validate_expression(part, bindings, columns, issues)
+    elif isinstance(formula, Membership):
+        _validate_expression(formula.expression, bindings, columns, issues)
+        _validate_collection(formula.collection, bindings, tables, columns, issues)
     elif isinstance(formula, Exists):
         nested = _collect_bindings(formula.body, tables, issues, bindings)
         if formula.variable not in nested:
@@ -140,6 +159,111 @@ def _validate_expression(
                     message=f"Invalid column '{expression.attribute}' on table '{table}'.",
                     location=f"{expression.variable}.{expression.attribute}",
                 )
+            )
+
+
+def _validate_collection(
+    collection: object,
+    bindings: dict[str, str],
+    tables: dict[str, object],
+    columns: dict[str, set[str]],
+    issues: list[ValidationIssue],
+) -> None:
+    if isinstance(collection, ValueList):
+        if not collection.items:
+            issues.append(
+                ValidationIssue(level="error", message="IN requires at least one value.", location="membership")
+            )
+        elif len({type(item.value) is str for item in collection.items}) > 1:
+            issues.append(
+                ValidationIssue(
+                    level="warning",
+                    message="IN mixes text and numeric values, which may not compare as intended.",
+                    location="membership",
+                )
+            )
+        return
+
+    if isinstance(collection, SetComprehension):
+        # The inner set may reference outer variables, so start from the outer bindings.
+        nested = _collect_bindings(collection.formula, tables, issues, bindings)
+        _validate_expression(collection.projection, nested, columns, issues)
+        _validate_formula(collection.formula, nested, tables, columns, issues)
+
+
+def _contains_aggregate(node: object) -> bool:
+    if isinstance(node, Aggregate):
+        return True
+    if isinstance(node, Comparison):
+        return _contains_aggregate(node.left) or _contains_aggregate(node.right)
+    if isinstance(node, Between):
+        return any(_contains_aggregate(item) for item in (node.expression, node.lower, node.upper))
+    if isinstance(node, (Like, IsNull, Membership)):
+        return _contains_aggregate(node.expression)
+    return False
+
+
+def _validate_shaping(
+    query: TrcQuery,
+    bindings: dict[str, str],
+    columns: dict[str, set[str]],
+    issues: list[ValidationIssue],
+) -> None:
+    shaping = query.shaping
+    if shaping is None:
+        return
+
+    for key in shaping.order_by:
+        _validate_expression(key.expression, bindings, columns, issues)
+
+    if shaping.limit is not None and shaping.limit < 0:
+        issues.append(ValidationIssue(level="error", message="LIMIT must not be negative.", location="shaping"))
+    if shaping.offset is not None:
+        if shaping.offset < 0:
+            issues.append(ValidationIssue(level="error", message="OFFSET must not be negative.", location="shaping"))
+        if shaping.limit is None:
+            issues.append(
+                ValidationIssue(level="error", message="OFFSET requires a LIMIT.", location="shaping")
+            )
+
+    if query.distinct:
+        projected = set(query.projections)
+        for key in shaping.order_by:
+            if key.expression not in projected:
+                issues.append(
+                    ValidationIssue(
+                        level="warning",
+                        message="Ordering a DISTINCT result by a column that is not projected is ambiguous.",
+                        location="shaping",
+                    )
+                )
+
+
+def _validate_grouping(query: TrcQuery, issues: list[ValidationIssue]) -> None:
+    """Check that an aggregate query has something meaningful to group by."""
+    having_terms = [term for term in flatten_and(query.formula) if _contains_aggregate(term)]
+    aggregate_projections = [item for item in query.projections if _contains_aggregate(item)]
+    if not having_terms and not aggregate_projections:
+        return
+
+    group_keys = [item for item in query.projections if not _contains_aggregate(item)]
+    if having_terms and not aggregate_projections and not group_keys:
+        issues.append(
+            ValidationIssue(
+                level="error",
+                message="An aggregate restriction needs either a grouping column or an aggregate projection.",
+                location="grouping",
+            )
+        )
+        return
+
+    if aggregate_projections and group_keys:
+        keys = ", ".join(
+            f"{item.variable}.{item.attribute}" for item in group_keys if isinstance(item, AttributeRef)
+        )
+        if keys:
+            issues.append(
+                ValidationIssue(level="info", message=f"Result will be grouped by {keys}.", location="grouping")
             )
 
 
