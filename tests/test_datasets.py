@@ -9,6 +9,7 @@ from core.datasets import (
     list_dataset_examples,
 )
 from models import JsonlExportRequest
+from tests.conftest import missing_dataset
 
 
 def test_dataset_catalog_includes_sample() -> None:
@@ -18,10 +19,11 @@ def test_dataset_catalog_includes_sample() -> None:
     assert catalog["sample"].available is True
 
 
-def test_spider_examples_load_when_dataset_present() -> None:
+@pytest.mark.requires_spider
+def test_spider_examples_load_when_dataset_present(spider_root) -> None:
     catalog = {item.id: item for item in dataset_catalog()}
     if not catalog.get("spider") or not catalog["spider"].available:
-        pytest.skip("Spider data is not present")
+        missing_dataset(spider_root, "Spider dev data")
 
     examples, total = list_dataset_examples("spider", "dev", limit=3)
 
@@ -31,10 +33,11 @@ def test_spider_examples_load_when_dataset_present() -> None:
     assert examples[0].db_path and Path(examples[0].db_path).exists()
 
 
-def test_auto_mined_spider_few_shots_have_sql() -> None:
+@pytest.mark.requires_spider
+def test_auto_mined_spider_few_shots_have_sql(spider_root) -> None:
     examples = extract_spider_few_shots(limit=2)
     if not examples:
-        pytest.skip("Spider train data is not present")
+        missing_dataset(spider_root, "Spider train data")
 
     assert len(examples) <= 2
     assert all(example.get("sql") for example in examples)

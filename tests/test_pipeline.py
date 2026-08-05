@@ -1,20 +1,15 @@
-from pathlib import Path
-
 import pytest
 
 from core.pipeline import run_trc_pipeline
 from models import PipelineRequest
 
 
-def test_grouped_count_query_uses_entity_name_and_count() -> None:
-    db_path = Path("data/spider_data/spider_data/database/concert_singer/concert_singer.sqlite")
-    if not db_path.exists():
-        pytest.skip("Spider concert_singer database is not present")
-
+@pytest.mark.requires_spider
+def test_grouped_count_query_uses_entity_name_and_count(spider_db) -> None:
     response = run_trc_pipeline(
         PipelineRequest(
             question="What are the names of the singers and number of concerts for each person?",
-            db_path=str(db_path),
+            db_path=spider_db,
         )
     )
 

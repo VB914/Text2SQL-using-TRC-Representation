@@ -6,7 +6,7 @@ from core.datasets import resolve_dataset_db_path
 from core.prompt_builder import build_repair_prompt, build_trc_prompt, prompt_summary
 from core.providers import get_provider
 from core.schema_utils import load_schema
-from core.sql_executor import execute_sql
+from core.sql_executor import execute_sql, sql_is_valid
 from core.trc_repair import repair_trc
 from core.trc_to_sql import trc_to_sql
 from core.trc_validator import heuristic_repair_trc, validate_trc
@@ -59,9 +59,38 @@ def run_trc_pipeline(request: PipelineRequest) -> PipelineResponse:
             )
 
         sql = trc_to_sql(trc, schema)
+        # Plan the statement before running it. This catches SQL that compiles from
+        # valid TRC but cannot execute against this database, and reports it as a
+        # generation failure rather than an unhandled error mid-execution.
+        try:
+            sql_valid = sql_is_valid(schema.db_path, sql)
+        except Exception as exc:
+            LOGGER.info("Generated SQL failed planning: %s", exc)
+            return PipelineResponse(
+                success=False,
+                provider=generated.provider,
+                question=question,
+                db_path=schema.db_path,
+                prompt_summary=prompt_summary(),
+                entities=generated.entities,
+                schema_mappings=generated.schema_mappings,
+                trc=trc,
+                sql=sql,
+                sql_valid=False,
+                validation=validation,
+                raw_output=generated.raw_output,
+                reasoning={
+                    "trc_generation": generated.reasoning,
+                    "validation": validation.summary,
+                    "sql_generation": "The TRC compiled, but the resulting SQL could not be planned.",
+                },
+                error=f"Generated SQL is not executable: {exc}",
+            )
+
         result = execute_sql(schema.db_path, sql)
         return PipelineResponse(
             success=True,
+            sql_valid=sql_valid,
             provider=generated.provider,
             question=question,
             db_path=schema.db_path,

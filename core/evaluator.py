@@ -19,7 +19,10 @@ _ORDER_BY = re.compile(r"\border\s+by\b", re.IGNORECASE)
 
 
 def normalize_sql(sql: str) -> str:
-    return re.sub(r"\s+", " ", sql.strip().rstrip(";")).lower()
+    # Collapse whitespace before trimming the terminator, otherwise "FROM t ;"
+    # keeps a trailing space and fails to match an otherwise identical query.
+    collapsed = re.sub(r"\s+", " ", sql).strip()
+    return collapsed.rstrip(" ;").lower()
 
 
 def exact_match(predicted_sql: str | None, gold_sql: str | None) -> bool | None:

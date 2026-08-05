@@ -77,6 +77,7 @@ class PipelineResponse(BaseModel):
     schema_mappings: list[str] = Field(default_factory=list)
     trc: str | None = None
     sql: str | None = None
+    sql_valid: bool | None = None
     validation: ValidationReport | None = None
     execution_result: QueryResult | None = None
     raw_output: str | None = None
